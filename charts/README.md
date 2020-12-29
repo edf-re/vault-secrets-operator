@@ -5,9 +5,8 @@
 | `replicaCount` | Number of replications which should be created. | `1` |
 | `deploymentStrategy` | Deployment strategy which should be used. | `{}` |
 | `image.repository` | The repository of the Docker image. | `ricoberger/vault-secrets-operator` |
-| `image.tag` | The tag of the Docker image which should be used. | `1.7.1` |
+| `image.tag` | The tag of the Docker image which should be used. | `1.10.1` |
 | `image.pullPolicy` | The pull policy for the Docker image, | `IfNotPresent` |
-| `image.args` | Command-line arguments which should be passed to the container. This can be used to configure the logging. | `[]` |
 | `image.volumeMounts` | Mount additional volumns to the container. | `[]` |
 | `imagePullSecrets` | Secrets which can be used to pull the Docker image. | `[]` |
 | `nameOverride` | Expand the name of the chart. | `""` |
@@ -21,7 +20,9 @@
 | `vault.reconciliationTime` | The time after which the reconcile function for the CR is rerun. If the value is 0, automatic reconciliation is skipped. | `0` |
 | `vault.namespaces` | Comma serpareted list of namespaces the operator will watch. If empty the operator will watch all namespaces. | `""` |
 | `crd.create` | Create the custom resource definition. | `true` |
-| `rbac.create` | Create the cluster role and cluster role bindings. | `true` |
+| `rbac.create` | Create RBAC object, enable ClusterRole and (Cluster)Role binding creation. | `true` |
+| `rbac.createclusterrole` | Finetune RBAC, enable or disable ClusterRole creation. NOTE: ignored when `rbac.create` not `true`. | `true` |
+| `rbac.namespaced` | Deploy in isolated namespace. Creates RoleBinding instead of a ClusterRoleBinding | `false` |
 | `serviceAccount.create` | Create the service account. | `true` |
 | `serviceAccount.name` | The name of the service account, which should be created/used by the operator. | `vault-secrets-operator` |
 | `podAnnotations` | Annotations for vault-secrets-operator pod(s). | `{}` |

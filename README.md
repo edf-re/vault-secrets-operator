@@ -53,7 +53,7 @@ To use Token auth method for the authentication against the Vault API, you need 
 vault token create -period=24h -policy=vault-secrets-operator
 ```
 
-To use the created token you need to pass the token as environment variable to the operator. For security reaseons the operator only supports the passing of environment variables via a Kubernetes secret. The secret with the keys `VAULT_TOKEN` and `VAULT_TOKEN_LEASE_DURATION` can be created with the following command:
+To use the created token you need to pass the token as an environment variable to the operator. For security reasons the operator only supports the passing of environment variables via a Kubernetes secret. The secret with the keys `VAULT_TOKEN` and `VAULT_TOKEN_LEASE_DURATION` (as well as optional keys `VAULT_TOKEN_RENEWAL_INTERVAL` and `VAULT_TOKEN_RENEWAL_RETRY_INTERVAL` to control timings for token renewals, if required) can be created with the following command:
 
 ```sh
 export VAULT_TOKEN=
@@ -89,7 +89,7 @@ environmentVars:
 
 #### Kubernetes Auth Method
 
-The recommanded way for the authentication is the Kubernetes auth method. There for you need a service account for the communication between Vault and the Vault Secrets Operator. If you installed the operator via Helm this service account is created for you. The name of the created service account is `vault-secrets-operator`. Use the following commands to set the environment variables for the activation of the Kubernetes auth method:
+The recommended way to authenticate is the Kubernetes auth method, which requires a service account for communication between Vault and the Vault Secrets Operator. If you installed the operator via Helm this service account is created for you. The name of the created service account is `vault-secrets-operator`. Use the following commands to set the environment variables for the activation of the Kubernetes auth method:
 
 ```sh
 export VAULT_SECRETS_OPERATOR_NAMESPACE=$(kubectl get sa vault-secrets-operator -o jsonpath="{.metadata.namespace}")
@@ -98,7 +98,7 @@ export SA_JWT_TOKEN=$(kubectl get secret $VAULT_SECRET_NAME -o jsonpath="{.data.
 export SA_CA_CRT=$(kubectl get secret $VAULT_SECRET_NAME -o jsonpath="{.data['ca\.crt']}" | base64 --decode; echo)
 export K8S_HOST=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
 
-# Verfify the environment variables
+# Verify the environment variables
 env | grep -E 'VAULT_SECRETS_OPERATOR_NAMESPACE|VAULT_SECRET_NAME|SA_JWT_TOKEN|SA_CA_CRT|K8S_HOST'
 ```
 
@@ -112,6 +112,13 @@ vault write auth/kubernetes/config \
   token_reviewer_jwt="$SA_JWT_TOKEN" \
   kubernetes_host="$K8S_HOST" \
   kubernetes_ca_cert="$SA_CA_CRT"
+
+# If you're running Vault inside kubernetes, you can alternatively exec into any Vault pod and run this...
+# In some bare-metal k8s setups this method is necessary.
+# vault write auth/kubernetes/config \
+#   token_reviewer_jwt="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" \
+#   kubernetes_host=https://${KUBERNETES_PORT_443_TCP_ADDR}:443 \
+#   kubernetes_ca_cert=@/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
 
 # Create a role named, 'vault-secrets-operator' to map Kubernetes Service Account to Vault policies and default token TTL
 vault write auth/kubernetes/role/vault-secrets-operator \
@@ -281,36 +288,133 @@ The value for `foo` stays as `YmFyCg==` which does not get base64 encoded again.
 
 It is also possible to change the default reconciliation strategy from `Replace` to `Merge` via the `reconcileStrategy` key in the CRD. For the default `Replace` strategy the complete secret is replaced. If you have an existing secret you can choose the `Merge` strategy to add the keys from Vault to the existing secret.
 
+### Using templated secrets
+
+When straight-forward secrets are not sufficient, and the target secrets need to be formatted in a certain way, you can use basic templating to format the secrets. There are multiple uses for this:
+
+* Generate URIs which contain secrets
+* Format secrets in a specific way, for example when using the [Helm Operator](https://docs.fluxcd.io/projects/helm-operator/) which [can use secrets as a source](https://docs.fluxcd.io/projects/helm-operator/en/stable/helmrelease-guide/values/#secrets) for its Helm chart parameterisation, but they have to be in YAML format wrapped inside a secret, like [`secretGenerator`](https://kubernetes-sigs.github.io/kustomize/api-reference/kustomization/secretegenerator/) from [Kustomize](https://kustomize.io) also generates.
+
+To do this, specify keys under `spec.templates`, containing a valid template string.
+When `templates` is defined, the standard generation of secrets is disabled, and only the defined templates will be generated.
+
+The templating uses the standard Go templating engine, also used in tools such as [Helm](https://helm.sh) or [Gomplate](https://gomplate.ca). The main differentiator here is that the `{%` and `%}` delimiters are used to prevent conflicts with standard Go templating tools such as Helm, which use `{{` and `}}` for this.
+
+The available functions during templating are the set offered by the [Sprig library](http://masterminds.github.io/sprig/) (similar to [Helm](https://helm.sh/docs/chart_template_guide/function_list/), but different from [Gomplate](https://docs.gomplate.ca)), excluding the following functions for security-reasons or their non-idempotent nature to avoid reconciliation problems:
+
+* `genPrivateKey`
+* `genCA`
+* `genSelfSignedCert`
+* `genSignedCert`
+* `htpasswd`
+* `getHostByName`
+* Random functions
+* Date/time functionality
+* Environment variable functions (for security reasons)
+
+#### Templating context
+
+The context available in the templating engine contains the following items:
+
+* `.Secrets`: Map with all the secrets fetched from vault. Key = secret name, Value = secret value
+* `.Vault`: Contains misc info about the Vault setup
+  * `.Vault.Address`: configured address of the Vault instance
+  * `.Vault.Path`: path of the Vault secret that was fetched
+* `.Namespace`: Namespace where the custom resource instance was deployed.
+* `.Labels`: access to the labels of the custom resource instance
+* `.Annotations`: access to the annotations of the custom resource instance
+
+#### Examples
+
+An example of a URI formatting secret:
+
+```yaml
+apiVersion: ricoberger.de/v1alpha1
+kind: VaultSecret
+metadata:
+  name: kvv1-example-vaultsecret
+  annotations:
+    redisdb: "0"
+spec:
+  keys:
+    - foo
+    - bar
+  path: kvv1/example-vaultsecret
+  templates:
+    fooUri: "https://user:{% .Secrets.foo %}@{% .Namespace %}.somesite.tld/api"
+    barUri: "redis://{% .Secrets.bar %}@redis/{% .Annotations.redisdb %}"
+  type: Opaque
+```
+
+The resulting secret will look like:
+
+```yaml
+apiVersion: v1
+data:
+  fooUri: aHR0cHM6Ly91c2VyOmZvb0BuYW1lc3BhY2UuLnNvbWVzaXRlLnRsZC9hcGkK
+  barUri: cmVkaXM6Ly9iYXJAcmVkaXMvMAo=
+kind: Secret
+metadata:
+  labels:
+    created-by: vault-secrets-operator
+  name: kvv1-example-vaultsecret
+type: Opaque
+```
+
+This is a more advanced example for a secret that can be used by [HelmOperator](https://docs.fluxcd.io/projects/helm-operator/) as [`valuesFrom[].secretKeyRef`](https://docs.fluxcd.io/projects/helm-operator/en/stable/helmrelease-guide/values/#secrets):
+
+```yaml
+apiVersion: ricoberger.de/v1alpha1
+kind: VaultSecret
+metadata:
+  name: kvv1-example-vaultsecret
+spec:
+  keys:
+    - foo
+    - bar
+    - baz
+  path: kvv1/example-vaultsecret
+  templates:
+    values.yaml: |-
+      secrets:
+      {%- range $k, $v := .Secrets %}
+        {% $k %}: {% $v | quote -%}
+      {% end %}
+  type: Opaque
+```
+
+This will loop over all secrets fetched from Vault, and set the `vault.yaml` key to a string like this:
+
+```yaml
+secrets:
+  foo: "foovalue"
+  bar: "barvalue"
+  baz: "bazvalue
+```
+
+#### Notes on templating
+
+* All secrets data is converted to string before being passed to the templating engine, so using binary data will not work well, or at least be unpredictable.
+
 ## Development
 
 After modifying the `*_types.go` file always run the following command to update the generated code for that resource type:
 
 ```sh
-operator-sdk generate k8s
+make generate
 ```
 
-To update the CRD `deploy/crds/ricoberger.de_vaultsecrets_crd.yaml`, run the following command:
+The above makefile target will invoke the [controller-gen](https://sigs.k8s.io/controller-tools) utility to update the `api/v1alpha1/zz_generated.deepcopy.go` file to ensure our API's Go type definitons implement the `runtime.Object` interface that all Kind types must implement.
+
+Once the API is defined with spec/status fields and CRD validation markers, the CRD manifests can be generated and updated with the following command:
 
 ```sh
-operator-sdk generate crds
+make manifests
 ```
 
-Create an example secret in Vault. Then apply the Custom Resource Definition for the Vault Secrets Operator and the example Custom Resource:
-
-```sh
-vault kv put kvv1/example-vaultsecret foo=bar
-
-kubectl apply -f deploy/crds/ricoberger.de_vaultsecrets_crd.yaml
-kubectl apply -f deploy/crds/ricoberger.de_v1alpha1_vaultsecret_cr.yaml
-```
+This makefile target will invoke controller-gen to generate the CRD manifests at `config/crd/bases/ricoberger.de_vaultsecrets.yaml`.
 
 ### Locally
-
-Set the name of the operator in an environment variable:
-
-```sh
-export OPERATOR_NAME=vault-secrets-operator
-```
 
 Specify the Vault address, a token to access Vault and the TTL (in seconds) for the token:
 
@@ -318,21 +422,20 @@ Specify the Vault address, a token to access Vault and the TTL (in seconds) for 
 export VAULT_ADDRESS=
 export VAULT_AUTH_METHOD=token
 export VAULT_TOKEN=
-export VAULT_TOKEN_LEASE_DURATION=
-export VAULT_RECONCILIATION_TIME=
+export VAULT_TOKEN_LEASE_DURATION=86400
+export VAULT_RECONCILIATION_TIME=180
 ```
 
-Run the operator locally with the default Kubernetes config file present at `$HOME/.kube/config`:
+Deploy the CRD and run the operator locally with the default Kubernetes config file present at `$HOME/.kube/config`:
 
 ```sh
-operator-sdk run local --watch-namespace=""
+kubectl apply -f config/crd/bases/ricoberger.de_vaultsecrets.yaml
+make run ENABLE_WEBHOOKS=false
 ```
-
-You can use a specific kubeconfig via the flag `--kubeconfig=<path/to/kubeconfig>`.
 
 ### Minikube
 
-Reuse Minikube’s built-in Docker daemon:
+Reuse Minikube's built-in Docker daemon:
 
 ```sh
 eval $(minikube docker-env)
@@ -341,26 +444,25 @@ eval $(minikube docker-env)
 Build the Docker image for the operator:
 
 ```sh
-make build
+make docker-build IMG=ricoberger/vault-secrets-operator:dev
+```
+
+Run the following to deploy the operator. This will also install the RBAC manifests from `config/rbac`.
+
+```sh
+make deploy IMG=ricoberger/vault-secrets-operator:dev
 ```
 
 Deploy the Helm chart:
 
 ```sh
-cat <<EOF | helm upgrade --install vault-secrets-operator ./charts/vault-secrets-operator -f -
-image:
-  repository: ricoberger/vault-secrets-operator
-  tag:
-  args: ["--zap-encoder", "console"]
-
-vault:
-  address: ""
-  authMethod: "kubernetes"
-EOF
+helm upgrade --install vault-secrets-operator ./charts/vault-secrets-operator --namespace=vault-secrets-operator --set vault.address="$VAULT_ADDRESS" --set image.repository="ricoberger/vault-secrets-operator" --set image.tag="dev"
 ```
+
+For an example using [kind](https://kind.sigs.k8s.io) you can take a look at the `testbin/setup-kind.sh` file.
 
 ## Links
 
-- [Managing Secrets in Kubernetes](https://www.weave.works/blog/managing-secrets-in-kubernetes)
-- [Operator SDK](https://github.com/operator-framework/operator-sdk)
-- [Vault](https://www.vaultproject.io)
+* [Managing Secrets in Kubernetes](https://www.weave.works/blog/managing-secrets-in-kubernetes)
+* [Operator SDK](https://github.com/operator-framework/operator-sdk)
+* [Vault](https://www.vaultproject.io)
