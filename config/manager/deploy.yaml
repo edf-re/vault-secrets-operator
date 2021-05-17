@@ -20,8 +20,8 @@ spec:
       - command:
         - /manager
         args:
-        - --enable-leader-election
-        image: ricoberger/vault-secrets-operator:1.10.1
+        - -leader-elect
+        image: ricoberger/vault-secrets-operator:1.14.3
         name: manager
         env:
         - name: WATCH_NAMESPACE
@@ -37,7 +37,7 @@ spec:
         - name: VAULT_RECONCILIATION_TIME
           value: "0"
         ports:
-        - name: metrics
+        - name: http-metrics
           containerPort: 8080
           protocol: TCP
         - name: http
